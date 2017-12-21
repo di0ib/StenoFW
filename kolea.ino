@@ -1,0 +1,484 @@
+/**
+ * StenoFW is a firmware for Stenoboard keyboards.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Copyright 2014 Emanuele Caruso. See LICENSE.txt for details.
+ */
+
+/**
+ * Matrix modified for the Kolea keyboard.
+ */
+ 
+#define ROWS 4
+#define COLS 11
+
+/* The following matrix is shown here for reference only.
+char keys[ROWS][COLS] = {
+    {' ', '2', '3', '4', '5', ' ', '7', '8', '9', '0', ' '},
+    {' ', 'q', 'w', 'e', 'r', 't', 'u', 'i', 'o', 'p', '['},
+    {' ', 'a', 's', 'd', 'f', 'g', 'j', 'k', 'l', ';', '\''},
+    {' ', ' ', ' ', 'c', 'v', ' ', 'n', 'm', ' ', ' ', ' '}
+};*/
+
+// Configuration variables
+int rowPins[ROWS] = {4, 5, 6, 7};
+int colPins[COLS] = {8, 9, 10, 11, 12, 14, 15, 16, 18, 19, 20};
+int ledPin = 3;
+long debounceMillis = 20;
+
+// Keyboard state variables
+boolean isStrokeInProgress = false;
+boolean currentChord[ROWS][COLS];
+boolean currentKeyReadings[ROWS][COLS];
+boolean debouncingKeys[ROWS][COLS];
+unsigned long debouncingMicros[ROWS][COLS];
+
+// Other state variables
+int ledIntensity = 1; // Min 0 - Max 255
+
+// Protocol state
+#define GEMINI 0
+#define TXBOLT 1
+#define NKRO 2
+int protocol = GEMINI;
+
+// This is called when the keyboard is connected
+void setup() {
+  Keyboard.begin();
+  Serial.begin(9600);
+  for (int i = 0; i < COLS; i++)
+    pinMode(colPins[i], INPUT_PULLUP);
+  for (int i = 0; i < ROWS; i++) {
+    pinMode(rowPins[i], OUTPUT);
+    digitalWrite(rowPins[i], HIGH);
+  }
+  pinMode(ledPin, OUTPUT);
+  analogWrite(ledPin, ledIntensity);
+  clearBooleanMatrixes();
+}
+
+// Read key states and handle all chord events
+void loop() {
+  readKeys();
+  
+  boolean isAnyKeyPressed = true;
+  
+  // If stroke is not in progress, check debouncing keys
+  if (!isStrokeInProgress) {
+    checkAlreadyDebouncingKeys();
+    if (!isStrokeInProgress) checkNewDebouncingKeys();
+  }
+  
+  // If any key was pressed, record all pressed keys
+  if (isStrokeInProgress) {
+    isAnyKeyPressed = recordCurrentKeys();
+  }
+  
+  // If all keys have been released, send the chord and reset global state
+  if (!isAnyKeyPressed) {
+    sendChord();
+    clearBooleanMatrixes();
+    isStrokeInProgress = false;
+  }
+}
+
+// Record all pressed keys into current chord. Return false if no key is currently pressed
+boolean recordCurrentKeys() {
+  boolean isAnyKeyPressed = false;
+  for (int i = 0; i < ROWS; i++) {
+    for (int j = 0; j < COLS; j++) {
+      if (currentKeyReadings[i][j] == true) {
+        currentChord[i][j] = true;
+        isAnyKeyPressed = true;
+      }
+    }
+  }
+  return isAnyKeyPressed;
+}
+
+// If a key is pressed, add it to debouncing keys and record the time
+void checkNewDebouncingKeys() {
+  for (int i = 0; i < ROWS; i++) {
+    for (int j = 0; j < COLS; j++) {
+      if (currentKeyReadings[i][j] == true && debouncingKeys[i][j] == false) {
+        debouncingKeys[i][j] = true;
+        debouncingMicros[i][j] = micros();
+      }
+    }
+  }
+}
+
+// Check already debouncing keys. If a key debounces, start chord recording.
+void checkAlreadyDebouncingKeys() {
+  for (int i = 0; i < ROWS; i++) {
+    for (int j = 0; j < COLS; j++) {
+      if (debouncingKeys[i][j] == true && currentKeyReadings[i][j] == false) {
+        debouncingKeys[i][j] = false;
+        continue;
+      }
+      if (debouncingKeys[i][j] == true && micros() - debouncingMicros[i][j] / 1000 > debounceMillis) {
+        isStrokeInProgress = true;
+        currentChord[i][j] = true;
+        return;
+      }
+    }
+  }
+}
+
+// Set all values of all boolean matrixes to false
+void clearBooleanMatrixes() {
+  clearBooleanMatrix(currentChord, false);
+  clearBooleanMatrix(currentKeyReadings, false);
+  clearBooleanMatrix(debouncingKeys, false);
+}
+
+// Set all values of the passed matrix to the given value
+void clearBooleanMatrix(boolean booleanMatrix[][COLS], boolean value) {
+  for (int i = 0; i < ROWS; i++) {
+    for (int j = 0; j < COLS; j++) {
+      booleanMatrix[i][j] = value;
+    }
+  }
+}
+
+// Read all keys
+void readKeys() {
+  for (int i = 0; i < ROWS; i++) {
+    digitalWrite(rowPins[i], LOW);
+    for (int j = 0; j < COLS; j++)
+      currentKeyReadings[i][j] = digitalRead(colPins[j]) == LOW ? true : false;
+    digitalWrite(rowPins[i], HIGH);
+  }
+}
+
+// Send current chord using NKRO Keyboard emulation
+void sendChordNkro() {
+  // QWERTY mapping
+  char qwertyMapping[ROWS][COLS] = {
+    {' ', '2', '3', '4', '5', ' ', '7', '8', '9', '0', ' '},
+    {' ', 'q', 'w', 'e', 'r', 't', 'u', 'i', 'o', 'p', '['},
+    {' ', 'a', 's', 'd', 'f', 'g', 'j', 'k', 'l', ';', '\''},
+    {' ', ' ', ' ', 'c', 'v', ' ', 'n', 'm', ' ', ' ', ' '}
+  };
+  int keyCounter = 0;
+  char qwertyKeys[ROWS * COLS];
+  boolean firstKeyPressed = false;
+  
+  // Calculate qwerty keys array using qwertyMappings[][]
+  for (int i = 0; i < ROWS; i++)
+    for (int j = 0; j < COLS; j++)
+      if (currentChord[i][j]) {
+        qwertyKeys[keyCounter] = qwertyMapping[i][j];
+        keyCounter++;
+      }
+  // Emulate keyboard key presses
+  for (int i = 0; i < keyCounter; i++) {
+    if (qwertyKeys[i] != ' ') {
+      Keyboard.press(qwertyKeys[i]);
+      if (!firstKeyPressed) firstKeyPressed = true;
+      else Keyboard.release(qwertyKeys[i]);
+    }
+  }
+  Keyboard.releaseAll();
+}
+ 
+// Send current chord over serial using the Gemini protocol. 
+void sendChordGemini() {
+  // Initialize chord bytes
+  byte chordBytes[] = {B10000000, B0, B0, B0, B0, B0};
+  
+  // Byte 0
+  //#
+  if (currentChord[0][1] || currentChord[0][2] || currentChord[0][3] || currentChord[0][4] || currentChord[0][6] || currentChord[0][7] || currentChord[0][8] || currentChord[0][9]) {
+    chordBytes[0] = B10000001;
+  }
+  
+  // Byte 1
+  //S
+  if (currentChord[1][1] || currentChord[2][1]) {
+    chordBytes[1] += B01000000;
+  }
+  //T
+  if (currentChord[1][2]) {
+    chordBytes[1] += B00010000;
+  }
+  //K
+  if (currentChord[2][2]) {
+    chordBytes[1] += B00001000;
+  }
+  //P
+  if (currentChord[1][3]) {
+    chordBytes[1] += B00000100;
+  }
+  //W
+  if (currentChord[2][3]) {
+    chordBytes[1] += B00000010;
+  }
+  //H
+  if (currentChord[1][4]) {
+    chordBytes[1] += B00000001;
+  }
+  
+  // Byte 2
+  //R
+  if (currentChord[2][4]) {
+    chordBytes[2] += B01000000;
+  }
+  //W
+  if (currentChord[3][3]) {
+    chordBytes[2] += B00100000;
+  }
+  //O
+  if (currentChord[3][4]) {
+    chordBytes[2] += B00010000;
+  }
+  //*
+  if (currentChord[1][5] || currentChord[2][5]) {
+    chordBytes[2] += B00001000;
+  }
+  
+  // Byte 3
+  //E
+  if (currentChord[3][6]) {
+    chordBytes[3] += B00001000;
+  }
+  //U
+  if (currentChord[3][7]) {
+    chordBytes[3] += B00000100;
+  }
+  //F
+  if (currentChord[1][6]) {
+    chordBytes[3] += B00000010;
+  }
+  //R
+  if (currentChord[2][6]) {
+    chordBytes[3] += B00000001;
+  }
+  
+  // Byte 4
+  //P
+  if (currentChord[1][7]) {
+    chordBytes[4] += B01000000;
+  }
+  //B
+  if (currentChord[2][7]) {
+    chordBytes[4] += B00100000;
+  }
+  //L
+  if (currentChord[1][8]) {
+    chordBytes[4] += B00010000;
+  }
+  //G
+  if (currentChord[2][8]) {
+    chordBytes[4] += B00001000;
+  }
+  //T
+  if (currentChord[1][9]) {
+    chordBytes[4] += B00000100;
+  }
+  //S
+  if (currentChord[2][9]) {
+    chordBytes[4] += B00000010;
+  }
+  //D
+  if (currentChord[1][10]) {
+    chordBytes[4] += B00000001;
+  }
+
+  // Byte 5
+  //Z
+  if (currentChord[2][10]) {
+    chordBytes[5] += B00000001;
+  }
+
+  // Send chord bytes over serial
+  for (int i = 0; i < 6; i++) {
+    Serial.write(chordBytes[i]);
+  }
+}
+
+void sendChordTxBolt() {
+  byte chordBytes[] = {B0, B0, B0, B0, B0};
+  int index = 0;
+  
+  // TX Bolt uses a variable length packet. Only those bytes that have active
+  // keys are sent. The header bytes indicate which keys are being sent. They
+  // must be sent in order. It is a good idea to send a zero after every packet.
+  // 00XXXXXX 01XXXXXX 10XXXXXX 110XXXXX
+  //   HWPKTS   UE*OAR   GLBPRF    #ZDST
+  
+  // byte 1
+  // S-
+  if (currentChord[1][1] || currentChord[2][1]) chordBytes[index] |= B00000001;
+  // T-
+  if (currentChord[1][2]) chordBytes[index] |= B00000010;  
+  // K-
+  if (currentChord[2][2]) chordBytes[index] |= B00000100;
+  // P-
+  if (currentChord[1][3]) chordBytes[index] |= B00001000;
+  // W-
+  if (currentChord[2][3]) chordBytes[index] |= B00010000;
+  // H-
+  if (currentChord[1][4]) chordBytes[index] |= B00100000;
+  // Increment the index if the current byte has any keys set.
+  if (chordBytes[index]) index++;
+  
+  // byte 2
+  // R-
+  if (currentChord[2][4]) chordBytes[index] |= B01000001;
+  // A
+  if (currentChord[3][3]) chordBytes[index] |= B01000010;
+  // O
+  if (currentChord[3][4]) chordBytes[index] |= B01000100;
+  // *
+  if (currentChord[1][5] || currentChord[2][5]) chordBytes[index] |= B01001000;
+  // E
+  if (currentChord[3][6]) chordBytes[index] |= B01010000;
+  // U
+  if (currentChord[3][7]) chordBytes[index] |= B01100000;
+  // Increment the index if the current byte has any keys set.
+  if (chordBytes[index]) index++;
+  
+  // byte 3
+  // -F
+  if (currentChord[1][6]) chordBytes[index] |= B10000001;
+  // -R
+  if (currentChord[2][6]) chordBytes[index] |= B10000010;
+  // -P
+  if (currentChord[1][7]) chordBytes[index] |= B10000100;
+  // -B
+  if (currentChord[2][7]) chordBytes[index] |= B10001000;
+  // -L
+  if (currentChord[1][8]) chordBytes[index] |= B10010000;
+  // -G
+  if (currentChord[2][8]) chordBytes[index] |= B10100000;
+  // Increment the index if the current byte has any keys set.
+  if (chordBytes[index]) index++;
+  
+  // byte 4
+  // -T
+  if (currentChord[1][9]) chordBytes[index] |= B11000001;
+  // -S
+  if (currentChord[2][9]) chordBytes[index] |= B11000010;
+  // -D
+  if (currentChord[1][10]) chordBytes[index] |= B11000100;
+  // -Z
+  if (currentChord[2][10]) chordBytes[index] |= B11001000;
+  // #
+  if (currentChord[0][1] || currentChord[0][2] || currentChord[0][3] || currentChord[0][4] || currentChord[0][6] || currentChord[0][7] || currentChord[0][8] || currentChord[0][9]) chordBytes[index] |= B11010000;
+  // Increment the index if the current byte has any keys set.
+  if (chordBytes[index]) index++;
+  
+  // Now we have index bytes followed by a zero byte where 0 < index <= 4.
+  index++; // Increment index to include the trailing zero byte.
+  for (int i = 0; i < index; i++) {
+    Serial.write(chordBytes[i]);
+  }
+}
+
+// Send the chord using the current protocol. If there are fn keys
+// pressed, delegate to the corresponding function instead.
+// In future versions, there should also be a way to handle fn keys presses before
+// they are released, eg. for mouse emulation functionality or custom key presses.
+void sendChord() {
+  // If fn keys have been pressed, delegate to corresponding method and return
+  if (currentChord[1][0] && currentChord[2][0]) {
+    fn1fn2();
+    return;
+  } else if (currentChord[1][0]) {
+    fn1();
+    return;
+  } else if (currentChord[2][0]) {
+    fn2();
+    return;
+  }
+  
+  if (protocol == NKRO) {
+    sendChordNkro();
+  } else if (protocol == GEMINI) {
+    sendChordGemini();
+  } else {
+    sendChordTxBolt();
+  }
+}
+
+// Fn1 functions
+//
+// This function is called when "fn1" key has been pressed, but not "fn2".
+// Tip: maybe it is better to avoid using "fn1" key alone in order to avoid
+// accidental activation?
+//
+// Current functions:
+//    PH-PB   ->   Set NKRO Keyboard emulation mode
+//    PH-G   ->   Set Gemini PR protocol mode
+//    PH-B   ->   Set TX Bolt protocol mode
+void fn1() {
+  // "PH" -> Set protocol
+  if (currentChord[1][3] && currentChord[1][4]) {
+    // "-PB" -> NKRO Keyboard
+    if (currentChord[1][7] && currentChord[2][7]) {
+      protocol = NKRO;
+    }
+    // "-G" -> Gemini PR
+    else if (currentChord[2][8]) {
+      protocol = GEMINI;
+    }
+    // "-B" -> TX Bolt
+    else if (currentChord[2][7]) {
+      protocol = TXBOLT;
+    }
+  }
+}
+
+// Fn2 functions
+//
+// This function is called when "fn2" key has been pressed, but not "fn1".
+// Tip: maybe it is better to avoid using "fn2" key alone in order to avoid
+// accidental activation?
+//
+// Current functions: none.
+void fn2() {
+
+}
+
+// Fn1-Fn2 functions
+//
+// This function is called when both "fn1" and "fn1" keys have been pressed.
+//
+// Current functions:
+//   HR-P   ->   LED intensity up
+//   HR-F   ->   LED intensity down
+void fn1fn2() {
+  // "HR" -> Change LED intensity
+  if (currentChord[1][4] && currentChord[2][4]) {
+    // "-P" -> LED intensity up
+    if (currentChord[1][7]) {
+      if (ledIntensity == 0) ledIntensity +=1;
+      else if(ledIntensity < 50) ledIntensity += 10;
+      else ledIntensity += 30;
+      if (ledIntensity > 255) ledIntensity = 0;
+      analogWrite(ledPin, ledIntensity);
+    }
+    // "-F" -> LED intensity down
+    if (currentChord[1][6]) {
+      if(ledIntensity == 0) ledIntensity = 255;
+      else if(ledIntensity < 50) ledIntensity -= 10;
+      else ledIntensity -= 30;
+      if (ledIntensity < 1) ledIntensity = 0;
+      analogWrite(ledPin, ledIntensity);
+    }
+  }
+}
+
