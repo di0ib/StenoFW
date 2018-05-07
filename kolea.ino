@@ -36,7 +36,7 @@ char keys[ROWS][COLS] = {
 int rowPins[ROWS] = {4, 5, 6, 7};
 int colPins[COLS] = {8, 9, 10, 11, 12, 14, 15, 16, 18, 19, 20};
 int ledPin = 3;
-long debounceMillis = 20;
+unsigned long debounceMillis = 20;
 
 // Keyboard state variables
 boolean isStrokeInProgress = false;
